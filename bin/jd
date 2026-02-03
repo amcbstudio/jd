@@ -1,0 +1,149 @@
+#!/bin/sh
+set -eu
+
+jd_usage() {
+	cat >&2 <<'EOF'
+jd — JSON Diagnostics Tool
+
+Usage:
+  jd scan [--ignore-empty]
+  jd fields
+  jd drift
+  jd help
+
+Notes:
+  - jd reads JSONL from stdin.
+  - jd is diagnostic/observational; it does not transform input.
+EOF
+}
+
+jd_die() {
+	# Always write user-facing errors to stderr.
+	# Machine-readable results (JSON) go to stdout.
+	printf '%s\n' "jd: $*" >&2
+	exit 2
+}
+
+jd_self_dir() {
+	# POSIX-safe script directory resolution.
+	# shellcheck disable=SC2164
+	CDPATH= cd "$(dirname "$0")" && pwd
+}
+
+cmd="${1-}"
+case "$cmd" in
+	'')
+		jd_usage
+		exit 2
+		;;
+	help|-h|--help)
+		jd_usage
+		exit 0
+		;;
+	scan)
+		shift
+		ignore_empty=0
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--ignore-empty)
+					ignore_empty=1
+					;;
+				-h|--help)
+					cat >&2 <<'EOF'
+Usage:
+  jd scan [--ignore-empty]
+
+Output:
+  - On first error: {"type":"error","line":N,"col":C,"error":"..."}
+  - If valid:      {"type":"summary","valid":true,"lines":N}
+
+Exit codes:
+  0  no errors
+  1  JSON syntax / structural errors found
+  2  usage error
+EOF
+					exit 0
+					;;
+				*)
+					jd_die "scan: unknown flag: $1"
+					;;
+			esac
+			shift
+		done
+
+		self_dir="$(jd_self_dir)"
+		lib_awkt="$self_dir/../lib/jd.awk"
+		if [ ! -f "$lib_awkt" ]; then
+			jd_die "missing awk library: $lib_awkt"
+		fi
+
+		awk -v mode="scan" -v ignore_empty="$ignore_empty" -f "$lib_awkt"
+		;;
+	fields)
+		shift
+		if [ $# -gt 0 ]; then
+			case "$1" in
+				-h|--help)
+					cat >&2 <<'EOF'
+Usage:
+  jd fields
+
+Output (JSONL):
+  {"type":"field","field":"...","first_type":"...","types":[...],"conflict":true|false}
+  {"type":"summary","lines":N,"records":N,"fields":N,"conflicts":N}
+
+Notes:
+  - Expects each non-empty line to be a JSON object.
+  - Empty/whitespace-only lines are ignored.
+EOF
+					exit 0
+					;;
+				*)
+					jd_die "fields: unexpected args"
+					;;
+			esac
+		fi
+		self_dir="$(jd_self_dir)"
+		lib_awkt="$self_dir/../lib/jd.awk"
+		if [ ! -f "$lib_awkt" ]; then
+			jd_die "missing awk library: $lib_awkt"
+		fi
+		awk -v mode="fields" -v ignore_empty="1" -f "$lib_awkt"
+		;;
+	drift)
+		shift
+		if [ $# -gt 0 ]; then
+			case "$1" in
+				-h|--help)
+					cat >&2 <<'EOF'
+Usage:
+  jd drift
+
+Output (JSONL):
+  {"type":"field_appeared",...}
+  {"type":"field_disappeared",...}
+  {"type":"type_changed",...}
+  {"type":"summary",...}
+
+Notes:
+  - Expects each non-empty line to be a JSON object.
+  - Empty/whitespace-only lines are ignored.
+EOF
+					exit 0
+					;;
+				*)
+					jd_die "drift: unexpected args"
+					;;
+			esac
+		fi
+		self_dir="$(jd_self_dir)"
+		lib_awkt="$self_dir/../lib/jd.awk"
+		if [ ! -f "$lib_awkt" ]; then
+			jd_die "missing awk library: $lib_awkt"
+		fi
+		awk -v mode="drift" -v ignore_empty="1" -f "$lib_awkt"
+		;;
+	*)
+		jd_die "unknown command: $cmd"
+		;;
+esac
