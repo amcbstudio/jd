@@ -106,6 +106,8 @@ Exit codes:
 
 Detects schema evolution over time.
 
+Exit status is drift-sensitive: `0` means no drift events were emitted, `1` means drift was detected (at least one drift event was emitted), and `2` means an error (invalid input, usage/runtime failure).
+
 Constraints:
 - each non-empty line must be a JSON **object**
 - empty/whitespace-only lines are ignored
@@ -118,9 +120,9 @@ Output (JSONL):
   - `{"type":"summary","lines":N,"records":N,"fields":N}`
 
 Exit codes:
-- `0` success
-- `1` parse/type errors (emits a `{"type":"error",...}` line)
-- `2` usage error
+- `0` no drift detected
+- `1` drift detected
+- `2` error
 
 Everything should be runnable locally, headlessly, and deterministically.
 

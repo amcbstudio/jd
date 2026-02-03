@@ -21,7 +21,11 @@ assert_diff() {
 	exit 1
 }
 
+set +e
 "$jd" drift < "$root_dir/fixtures/drift_basic.jsonl" > "$tmp_dir/out"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || exit 1
 cat > "$tmp_dir/exp" <<'EOF'
 {"type":"field_appeared","field":"c","line":2,"value_type":"bool"}
 {"type":"field_disappeared","field":"b","last_line":1,"last_type":"string"}
@@ -32,3 +36,18 @@ cat > "$tmp_dir/exp" <<'EOF'
 EOF
 assert_diff "$tmp_dir/exp" "$tmp_dir/out"
 
+# type change fixture => drift => exit 1
+set +e
+"$jd" drift < "$root_dir/testdata/drift/type_change.jsonl" > "$tmp_dir/out"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || exit 1
+grep -q '"type":"type_changed"' "$tmp_dir/out"
+grep -q '"type":"summary"' "$tmp_dir/out"
+
+# no change fixture => no drift => exit 0
+"$jd" drift < "$root_dir/testdata/drift/no_change.jsonl" > "$tmp_dir/out"
+grep -q '"type":"summary"' "$tmp_dir/out"
+if grep -q '"type":"type_changed"' "$tmp_dir/out"; then
+	exit 1
+fi
