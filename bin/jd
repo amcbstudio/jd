@@ -333,23 +333,29 @@ function is_blank_line(s,    t) {
 			next
 		}
 		validate_json_line($0)
+		err_exit = 1
+		if (mode == "drift") err_exit = 2
 		out_error(NR, err_pos, err_code)
-		exit_code = 1
-		exit 1
+		exit_code = err_exit
+		exit err_exit
 	}
 
 	if ((mode == "fields" || mode == "drift") && records == 0) first_record_line = NR
 
 	validate_json_line($0)
 	if (err_code != "") {
+		err_exit = 1
+		if (mode == "drift") err_exit = 2
 		out_error(NR, err_pos, err_code)
-		exit_code = 1
-		exit 1
+		exit_code = err_exit
+		exit err_exit
 	}
 	if ((mode == "fields" || mode == "drift") && last_type != "object") {
+		err_exit = 1
+		if (mode == "drift") err_exit = 2
 		out_error(NR, 1, "not_object")
-		exit_code = 1
-		exit 1
+		exit_code = err_exit
+		exit err_exit
 	}
 	records++
 	last_record_line = NR
@@ -400,12 +406,15 @@ END {
 	}
 
 	if (mode == "drift") {
+		drift_found = 0
+
 		# Emit appearance events (fields first seen after the first record line)
 		for (i = 1; i <= fields_n; i++) {
 			f = field_order[i]
 			if (field_first_line[f] > first_record_line) {
 				printf("{\"type\":\"field_appeared\",\"field\":\"%s\",\"line\":%d,\"value_type\":\"%s\"}\n",
 					json_escape(f), field_first_line[f], json_escape(field_first_type[f]))
+				drift_found = 1
 			}
 		}
 
@@ -415,6 +424,7 @@ END {
 			if (field_last_line[f] < last_record_line) {
 				printf("{\"type\":\"field_disappeared\",\"field\":\"%s\",\"last_line\":%d,\"last_type\":\"%s\"}\n",
 					json_escape(f), field_last_line[f], json_escape(field_last_type[f]))
+				drift_found = 1
 			}
 		}
 
@@ -425,10 +435,11 @@ END {
 				type_change_line[i],
 				json_escape(type_change_from[i]),
 				json_escape(type_change_to[i]))
+			drift_found = 1
 		}
 
 		printf("{\"type\":\"summary\",\"lines\":%d,\"records\":%d,\"fields\":%d}\n", total_lines, records, fields_n)
-		exit 0
+		exit drift_found
 	}
 }
 AWK
