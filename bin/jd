@@ -44,8 +44,19 @@ BEGIN {
 	first_record_line = 0
 	last_record_line = 0
 
+	baseline_fields_n = 0
+	baseline_violation_n = 0
+	parsing_baseline = 0
+	baseline_capture_key = ""
+	capture_array = ""
+	last_array_n = 0
+
 	fields_n = 0
 	type_changes_n = 0
+
+	if (mode == "drift" && baseline_path != "") {
+		load_baseline(baseline_path)
+	}
 }
 
 function json_escape(s,    out) {
@@ -66,6 +77,73 @@ function out_error(line_no, col_no, code) {
 
 function out_summary_scan(valid, lines) {
 	printf("{\"type\":\"summary\",\"valid\":%s,\"lines\":%d}\n", valid ? "true" : "false", lines)
+}
+
+function baseline_reset_obj() {
+	baseline_obj_type = ""
+	baseline_obj_field = ""
+	baseline_obj_first_type = ""
+	baseline_obj_types_n = 0
+	delete baseline_obj_types
+}
+
+function load_baseline(path,    line, line_no, i) {
+	parsing_baseline = 1
+	line_no = 0
+
+	while ((getline line < path) > 0) {
+		line_no++
+		if (is_blank_line(line)) continue
+
+		baseline_reset_obj()
+		baseline_capture_key = ""
+		capture_array = ""
+
+		validate_json_line(line)
+		if (err_code != "") {
+			out_error(line_no, err_pos, "invalid_baseline")
+			exit_code = 2
+			exit 2
+		}
+		if (last_type != "object") {
+			out_error(line_no, 1, "invalid_baseline")
+			exit_code = 2
+			exit 2
+		}
+
+		if (baseline_obj_type == "summary") {
+			continue
+		}
+		if (baseline_obj_type != "field") {
+			out_error(line_no, 1, "invalid_baseline")
+			exit_code = 2
+			exit 2
+		}
+		if (baseline_obj_field == "" || baseline_obj_first_type == "" || baseline_obj_types_n == 0) {
+			out_error(line_no, 1, "invalid_baseline")
+			exit_code = 2
+			exit 2
+		}
+
+		if (!(baseline_obj_field in baseline_field_seen)) {
+			baseline_field_seen[baseline_obj_field] = 1
+			baseline_order[++baseline_fields_n] = baseline_obj_field
+			baseline_first_type[baseline_obj_field] = baseline_obj_first_type
+		}
+
+		for (i = 1; i <= baseline_obj_types_n; i++) {
+			baseline_types[baseline_obj_field SUBSEP baseline_obj_types[i]] = 1
+		}
+	}
+
+	close(path)
+	parsing_baseline = 0
+
+	if (baseline_fields_n == 0) {
+		out_error(0, 0, "invalid_baseline")
+		exit_code = 2
+		exit 2
+	}
 }
 
 # ---- JSON parser (single-line JSON text) ----
@@ -159,8 +237,13 @@ function parse_string(pos,    c, esc, hex) {
 	return pos
 }
 
-function parse_array(pos, depth,    c) {
+function parse_array(pos, depth,    c, elem_pos) {
 	# pos points to first character AFTER '['
+	if (capture_array != "") {
+		last_array_n = 0
+		delete last_array_string
+	}
+
 	pos = skip_ws(pos)
 	if (pos <= text_len && substr(text, pos, 1) == "]") {
 		last_type = "array"
@@ -168,8 +251,16 @@ function parse_array(pos, depth,    c) {
 	}
 
 	while (1) {
+		elem_pos = pos
 		pos = parse_value(pos, depth)
 		if (err_code != "") return pos
+		if (capture_array != "") {
+			if (last_type != "string") {
+				err_set("invalid_baseline", elem_pos)
+				return pos
+			}
+			last_array_string[++last_array_n] = last_string
+		}
 		pos = skip_ws(pos)
 		if (pos > text_len) {
 			err_set("invalid_json", pos)
@@ -190,7 +281,7 @@ function parse_array(pos, depth,    c) {
 	}
 }
 
-function record_field(name, vtype, line_no) {
+function record_field(name, vtype, line_no,    k) {
 	if (!(name in field_seen)) {
 		field_seen[name] = 1
 		field_order[++fields_n] = name
@@ -200,7 +291,19 @@ function record_field(name, vtype, line_no) {
 	field_last_line[name] = line_no
 
 	# type set (for conflicts)
-	field_types[name SUBSEP vtype] = 1
+	k = name SUBSEP vtype
+	field_types[k] = 1
+	if (!(k in field_type_first_line)) field_type_first_line[k] = line_no
+
+	if (mode == "drift" && baseline_path != "" && (name in baseline_field_seen) && !(k in baseline_types) && !(k in baseline_violation_seen)) {
+		baseline_violation_seen[k] = 1
+		baseline_violation_n++
+		baseline_violation_field[baseline_violation_n] = name
+		baseline_violation_line[baseline_violation_n] = line_no
+		baseline_violation_from[baseline_violation_n] = baseline_first_type[name]
+		baseline_violation_to[baseline_violation_n] = vtype
+	}
+
 	if (field_last_type[name] != "" && field_last_type[name] != vtype) {
 		type_changes_n++
 		type_change_field[type_changes_n] = name
@@ -211,7 +314,7 @@ function record_field(name, vtype, line_no) {
 	field_last_type[name] = vtype
 }
 
-function parse_object(pos, depth, line_no,    c, key, vtype) {
+function parse_object(pos, depth, line_no,    c, key, vtype, i) {
 	# pos points to first character AFTER '{'
 	pos = skip_ws(pos)
 	if (pos <= text_len && substr(text, pos, 1) == "}") {
@@ -242,11 +345,38 @@ function parse_object(pos, depth, line_no,    c, key, vtype) {
 			err_set("unexpected_token", pos)
 			return pos
 		}
+
+		if (parsing_baseline && depth == 1) {
+			if (key == "type" || key == "field" || key == "first_type" || key == "types") {
+				baseline_capture_key = key
+			} else {
+				baseline_capture_key = ""
+			}
+		}
+
 		pos = parse_value(pos + 1, depth)
 		if (err_code != "") return pos
 		vtype = last_type
 
-		if ((mode == "fields" || mode == "drift") && depth == 1) {
+		if (parsing_baseline && depth == 1 && baseline_capture_key != "") {
+			if (baseline_capture_key == "type" && vtype == "string") {
+				baseline_obj_type = last_string
+			} else if (baseline_capture_key == "field" && vtype == "string") {
+				baseline_obj_field = last_string
+			} else if (baseline_capture_key == "first_type" && vtype == "string") {
+				baseline_obj_first_type = last_string
+			} else if (baseline_capture_key == "types" && vtype == "array") {
+				baseline_obj_types_n = last_array_n
+				delete baseline_obj_types
+				for (i = 1; i <= last_array_n; i++) baseline_obj_types[i] = last_array_string[i]
+			} else {
+				err_set("invalid_baseline", pos)
+				return pos
+			}
+			baseline_capture_key = ""
+		}
+
+		if ((mode == "fields" || mode == "drift") && depth == 1 && !parsing_baseline) {
 			record_field(key, vtype, line_no)
 		}
 
@@ -269,7 +399,7 @@ function parse_object(pos, depth, line_no,    c, key, vtype) {
 	}
 }
 
-function parse_value(pos, depth,    c) {
+function parse_value(pos, depth,    c, pos2) {
 	pos = skip_ws(pos)
 	if (pos > text_len) {
 		err_set("invalid_json", pos)
@@ -278,7 +408,16 @@ function parse_value(pos, depth,    c) {
 	c = substr(text, pos, 1)
 
 	if (c == "{") return parse_object(pos + 1, depth + 1, NR)
-	if (c == "[") return parse_array(pos + 1, depth + 1)
+	if (c == "[") {
+		if (parsing_baseline && baseline_capture_key == "types") {
+			capture_array = "types"
+		} else {
+			capture_array = ""
+		}
+		pos2 = parse_array(pos + 1, depth + 1)
+		if (capture_array != "") capture_array = ""
+		return pos2
+	}
 	if (c == "\"") return parse_string(pos + 1)
 	if (c == "t") return parse_literal(pos, "true")
 	if (c == "f") return parse_literal(pos, "false")
@@ -395,18 +534,60 @@ END {
 			if (n_types > 1) conflict = 1
 			if (conflict) conflicts++
 
-			printf("{\"type\":\"field\",\"field\":\"%s\",\"first_type\":\"%s\",\"types\":[%s],\"conflict\":%s}\n",
+			line = sprintf("{\"type\":\"field\",\"field\":\"%s\",\"first_type\":\"%s\",\"types\":[%s],\"conflict\":%s}\n",
 				json_escape(f),
 				json_escape(field_first_type[f]),
 				types,
 				conflict ? "true" : "false")
+			printf("%s", line)
+			if (write_baseline != "") printf("%s", line) >> write_baseline
 		}
-		printf("{\"type\":\"summary\",\"lines\":%d,\"records\":%d,\"fields\":%d,\"conflicts\":%d}\n", total_lines, records, fields_n, conflicts)
+		line = sprintf("{\"type\":\"summary\",\"lines\":%d,\"records\":%d,\"fields\":%d,\"conflicts\":%d}\n", total_lines, records, fields_n, conflicts)
+		printf("%s", line)
+		if (write_baseline != "") {
+			printf("%s", line) >> write_baseline
+			close(write_baseline)
+		}
 		exit 0
 	}
 
 	if (mode == "drift") {
 		drift_found = 0
+
+		if (baseline_path != "") {
+			# Fields present in current input but missing from baseline.
+			for (i = 1; i <= fields_n; i++) {
+				f = field_order[i]
+				if (!(f in baseline_field_seen)) {
+					printf("{\"type\":\"field_appeared\",\"field\":\"%s\",\"line\":%d,\"value_type\":\"%s\"}\n",
+						json_escape(f), field_first_line[f], json_escape(field_first_type[f]))
+					drift_found = 1
+				}
+			}
+
+			# Fields present in baseline but missing from current input.
+			for (i = 1; i <= baseline_fields_n; i++) {
+				f = baseline_order[i]
+				if (!(f in field_seen)) {
+					printf("{\"type\":\"field_disappeared\",\"field\":\"%s\",\"last_line\":%d,\"last_type\":\"%s\"}\n",
+						json_escape(f), 0, json_escape(baseline_first_type[f]))
+					drift_found = 1
+				}
+			}
+
+			# Type changes relative to baseline (in order observed).
+			for (i = 1; i <= baseline_violation_n; i++) {
+				printf("{\"type\":\"type_changed\",\"field\":\"%s\",\"line\":%d,\"from\":\"%s\",\"to\":\"%s\"}\n",
+					json_escape(baseline_violation_field[i]),
+					baseline_violation_line[i],
+					json_escape(baseline_violation_from[i]),
+					json_escape(baseline_violation_to[i]))
+				drift_found = 1
+			}
+
+			printf("{\"type\":\"summary\",\"lines\":%d,\"records\":%d,\"fields\":%d}\n", total_lines, records, fields_n)
+			exit drift_found
+		}
 
 		# Emit appearance events (fields first seen after the first record line)
 		for (i = 1; i <= fields_n; i++) {
@@ -515,12 +696,27 @@ EOF
 		;;
 	drift)
 		shift
-		if [ $# -gt 0 ]; then
+		baseline_path=''
+		write_baseline_path=''
+
+		while [ $# -gt 0 ]; do
 			case "$1" in
+				--baseline)
+					shift
+					[ $# -gt 0 ] || jd_die "drift: --baseline requires a file"
+					baseline_path=$1
+					;;
+				--write-baseline)
+					shift
+					[ $# -gt 0 ] || jd_die "drift: --write-baseline requires a file"
+					write_baseline_path=$1
+					;;
 				-h|--help)
 					cat >&2 <<'EOF'
 Usage:
   jd drift
+  jd drift --baseline FILE
+  jd drift --write-baseline FILE
 
 Output (JSONL):
   {"type":"field_appeared",...}
@@ -531,14 +727,60 @@ Output (JSONL):
 Notes:
   - Expects each non-empty line to be a JSON object.
   - Empty/whitespace-only lines are ignored.
+  - --baseline FILE expects a baseline produced by jd fields (JSONL).
 EOF
 					exit 0
 					;;
 				*)
-					jd_die "drift: unexpected args"
+					jd_die "drift: unknown flag: $1"
 					;;
 			esac
+			shift
+		done
+
+		if [ -n "$baseline_path" ] && [ -n "$write_baseline_path" ]; then
+			jd_die "drift: --baseline and --write-baseline are mutually exclusive"
 		fi
+
+		if [ -n "$write_baseline_path" ]; then
+			tmp="${write_baseline_path}.tmp.$$"
+			if ! : >"$tmp" 2>/dev/null; then
+				printf '%s\n' '{"type":"error","line":0,"col":0,"error":"baseline_unwritable"}'
+				exit 2
+			fi
+
+			set +e
+			awk -v mode="fields" -v ignore_empty="1" -v write_baseline="$tmp" "$(jd_awk_program)"
+			rc=$?
+			set -e
+
+			if [ "$rc" -ne 0 ]; then
+				rm -f "$tmp"
+				exit "$rc"
+			fi
+
+			if ! mv "$tmp" "$write_baseline_path" 2>/dev/null; then
+				rm -f "$tmp"
+				printf '%s\n' '{"type":"error","line":0,"col":0,"error":"baseline_unwritable"}'
+				exit 2
+			fi
+
+			exit 0
+		fi
+
+		if [ -n "$baseline_path" ]; then
+			if [ ! -f "$baseline_path" ]; then
+				printf '%s\n' '{"type":"error","line":0,"col":0,"error":"baseline_missing"}'
+				exit 2
+			fi
+			if [ ! -r "$baseline_path" ]; then
+				printf '%s\n' '{"type":"error","line":0,"col":0,"error":"baseline_unreadable"}'
+				exit 2
+			fi
+			awk -v mode="drift" -v ignore_empty="1" -v baseline_path="$baseline_path" "$(jd_awk_program)"
+			exit $?
+		fi
+
 		awk -v mode="drift" -v ignore_empty="1" "$(jd_awk_program)"
 		;;
 	*)

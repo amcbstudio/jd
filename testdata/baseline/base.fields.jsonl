@@ -1,0 +1,5 @@
+{"type":"field","field":"ts","first_type":"number","types":["number"],"conflict":false}
+{"type":"field","field":"event","first_type":"string","types":["string"],"conflict":false}
+{"type":"field","field":"user","first_type":"string","types":["string"],"conflict":false}
+{"type":"field","field":"ok","first_type":"bool","types":["bool"],"conflict":false}
+{"type":"summary","lines":2,"records":2,"fields":4,"conflicts":0}

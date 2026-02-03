@@ -108,6 +108,13 @@ Detects schema evolution over time.
 
 Exit status is drift-sensitive: `0` means no drift events were emitted, `1` means drift was detected (at least one drift event was emitted), and `2` means an error (invalid input, usage/runtime failure).
 
+Baseline mode compares the current stream against a saved schema surface (a baseline file produced by `jd fields`), instead of observing drift within the stream itself:
+
+```sh
+cat events.jsonl | jd fields > baseline.fields.jsonl
+cat events.jsonl | jd drift --baseline baseline.fields.jsonl
+```
+
 Constraints:
 - each non-empty line must be a JSON **object**
 - empty/whitespace-only lines are ignored
